@@ -10,12 +10,12 @@
 // ----------------------------------------------------------
 const CONFIG = {
   // Replace with your ESP32's IP address from Serial Monitor
-  ESP32_IP:   '192.168.1.100',   // <-- CHANGE THIS
+  ESP32_IP:   '192.168.1.100',   // <-- CHANGE THIS FOR LOCAL DEV
   WS_PORT:    81,
   MAX_LOG:    100,               // Max log table rows
   MAX_CHART:  20,                // Data points per chart
   RECONNECT_DELAY: 3000,        // ms between reconnect attempts
-  DEMO_MODE:  true,             // true = show simulated data if no ESP32 connected
+  DEMO_MODE:  false,            // false by default for live hardware monitoring
 };
 
 // ----------------------------------------------------------
@@ -122,7 +122,7 @@ function initMQTT() {
         if (!err) {
           console.log('[MQTT] Subscribed to telemetry topic:', MQTT_CONFIG.topicTelemetry);
           if (!state.connected) {
-            updateConnectionBadge('connected');
+            updateConnectionBadge('connecting', 'Cloud Connected · Awaiting ESP32 Telemetry…');
           }
         } else {
           console.error('[MQTT] Subscribe error:', err);
@@ -136,6 +136,7 @@ function initMQTT() {
           const data = JSON.parse(payload.toString());
           state.connected = true;
           stopDemo();
+          updateConnectionBadge('connected', 'ESP32 Connected (Cloud)');
           processData(data);
         } catch (e) {
           console.error('[MQTT] JSON parse error:', e);
@@ -146,7 +147,7 @@ function initMQTT() {
     mqttClient.on('offline', () => {
       console.warn('[MQTT] Client offline — waiting for reconnect…');
       if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
-        updateConnectionBadge('disconnected');
+        updateConnectionBadge('disconnected', 'Cloud Offline · Retrying…');
       }
     });
   } catch (err) {
@@ -208,7 +209,7 @@ function clearReconnectTimer() {
 // ----------------------------------------------------------
 // Connection Badge UI
 // ----------------------------------------------------------
-function updateConnectionBadge(status) {
+function updateConnectionBadge(status, customText = null) {
   const badge = document.getElementById('connection-badge');
   const dot   = document.getElementById('conn-dot');
   const text  = document.getElementById('conn-text');
@@ -224,7 +225,7 @@ function updateConnectionBadge(status) {
     demo:         'Demo Mode',
   };
 
-  text.textContent = labels[status] || status;
+  text.textContent = customText || labels[status] || status;
   
   // Update class and styling cleanly
   dot.className = 'dot' + (status === 'connecting' ? ' pulse' : '');
@@ -1069,13 +1070,12 @@ document.addEventListener('DOMContentLoaded', () => {
   loadSettings();     // ← Load saved settings before connecting
   initMQTT();         // ← Connect to remote MQTT cloud broker for cross-network connectivity
 
-  // Attempt WebSocket connection to ESP32 (if local IP configured)
-  if (CONFIG.ESP32_IP !== '192.168.1.100') {
+  // Attempt WebSocket connection to ESP32 only if on HTTP (local development)
+  if (window.location.protocol === 'http:' && CONFIG.ESP32_IP && CONFIG.ESP32_IP !== '192.168.1.100') {
     connectWebSocket();
   } else {
-    console.warn('[CONFIG] Local ESP32_IP not set — connecting via MQTT / Cloud');
+    updateConnectionBadge('connecting', 'Connecting to Cloud MQTT…');
     if (CONFIG.DEMO_MODE) startDemo();
-    else updateConnectionBadge('disconnected');
   }
 });
 
