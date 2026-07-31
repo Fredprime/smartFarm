@@ -114,14 +114,21 @@
 #define DEFAULT_AUTO_MODE false         // Start in MANUAL mode (safer for commissioning)
 
 // ----------------------------------------------------------
-// Cloud Backend (Future Integration)
-//   Uncomment and fill in when adding cloud logging.
-//   See docs/README.md §Cloud Storage for provider options.
+// MQTT Broker Configuration (Remote Cross-Network Control)
 // ----------------------------------------------------------
-// #define CLOUD_ENABLED        true
-// #define FIREBASE_HOST        "your-project.firebaseio.com"
-// #define FIREBASE_AUTH        "your-database-secret"
-// #define THINGSPEAK_API_KEY   "YOUR_WRITE_KEY"
-// #define THINGSPEAK_CHANNEL   123456
+#define MQTT_BROKER             "broker.hivemq.com"
+#define MQTT_PORT               1883
+#define MQTT_CLIENT_ID          "SmartFarm_ESP32"
+#define MQTT_TOPIC_TELEMETRY    "smartfarm/telemetry"
+#define MQTT_TOPIC_CONTROL      "smartfarm/control"
+#define MQTT_RECONNECT_MS       5000
+
+// ----------------------------------------------------------
+// Supabase Direct REST API (Cloud Database Logging)
+// ----------------------------------------------------------
+#define SUPABASE_ENABLED        true
+#define SUPABASE_URL            "https://exnhqpzlkucjiubvsabx.supabase.co"
+#define SUPABASE_ANON_KEY       "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4bmhxcHpsa3Vjaml1YnZzYWJ4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU0OTgxOTYsImV4cCI6MjEwMTA3NDE5Nn0.LQFvw98M2cN4Ojf7LoUp2kJR7bMoCGICcdSmM9xlW9g"
+#define SUPABASE_POST_INTERVAL_MS 60000 // Send data to Supabase every 60 seconds
 
 #endif // CONFIG_H

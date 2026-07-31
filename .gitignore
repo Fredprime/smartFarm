@@ -17,3 +17,4 @@ Thumbs.db
 # Local Codex metadata
 .agents/
 .codex/
+dashboard/.vercel/

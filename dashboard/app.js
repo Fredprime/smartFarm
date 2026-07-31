@@ -88,12 +88,98 @@ function connectWebSocket() {
   };
 }
 
+// ----------------------------------------------------------
+// MQTT Configuration — Remote Cross-Network Connectivity
+// ----------------------------------------------------------
+const MQTT_CONFIG = {
+  brokerWssUrl: 'wss://broker.hivemq.com:8884/mqtt',
+  topicTelemetry: 'smartfarm/telemetry',
+  topicControl:   'smartfarm/control',
+  clientId:       'SmartFarm_Dashboard_' + Math.random().toString(16).slice(2, 8)
+};
+
+let mqttClient = null;
+
+function initMQTT() {
+  if (typeof mqtt === 'undefined') {
+    console.warn('[MQTT] mqtt.js CDN not loaded — skipping MQTT init');
+    return;
+  }
+
+  console.log('[MQTT] Connecting to remote broker:', MQTT_CONFIG.brokerWssUrl);
+
+  try {
+    mqttClient = mqtt.connect(MQTT_CONFIG.brokerWssUrl, {
+      clientId: MQTT_CONFIG.clientId,
+      clean: true,
+      reconnectPeriod: 5000,
+      connectTimeout: 10000
+    });
+
+    mqttClient.on('connect', () => {
+      console.log('[MQTT] Connected to cloud broker');
+      mqttClient.subscribe(MQTT_CONFIG.topicTelemetry, { qos: 0 }, (err) => {
+        if (!err) {
+          console.log('[MQTT] Subscribed to telemetry topic:', MQTT_CONFIG.topicTelemetry);
+          if (!state.connected) {
+            updateConnectionBadge('connected');
+          }
+        } else {
+          console.error('[MQTT] Subscribe error:', err);
+        }
+      });
+    });
+
+    mqttClient.on('message', (topic, payload) => {
+      if (topic === MQTT_CONFIG.topicTelemetry) {
+        try {
+          const data = JSON.parse(payload.toString());
+          state.connected = true;
+          stopDemo();
+          processData(data);
+        } catch (e) {
+          console.error('[MQTT] JSON parse error:', e);
+        }
+      }
+    });
+
+    mqttClient.on('offline', () => {
+      console.warn('[MQTT] Client offline — waiting for reconnect…');
+      if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+        updateConnectionBadge('disconnected');
+      }
+    });
+  } catch (err) {
+    console.error('[MQTT] Init error:', err);
+  }
+}
+
+function publishMQTTCommand(payload) {
+  if (mqttClient && mqttClient.connected) {
+    const msg = JSON.stringify(payload);
+    mqttClient.publish(MQTT_CONFIG.topicControl, msg, { qos: 1 });
+    console.log('[MQTT] Command published:', msg);
+    return true;
+  }
+  return false;
+}
+
 function sendCommand(payload) {
+  let sent = false;
+
+  // 1. Send via local WebSocket if connected
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify(payload));
-  } else {
-    console.warn('[WS] Not connected — command dropped');
-    // In demo mode, simulate response
+    sent = true;
+  }
+
+  // 2. Also publish via MQTT for remote cross-network control
+  if (publishMQTTCommand(payload)) {
+    sent = true;
+  }
+
+  if (!sent) {
+    console.warn('[CMD] Not connected to WS or MQTT — fallback');
     if (CONFIG.DEMO_MODE) {
       if (payload.action === 'pump_on')        state.pumpState = true;
       else if (payload.action === 'pump_off')  state.pumpState = false;
@@ -981,12 +1067,13 @@ document.addEventListener('DOMContentLoaded', () => {
   startHeaderClock();
   initCharts();
   loadSettings();     // ← Load saved settings before connecting
+  initMQTT();         // ← Connect to remote MQTT cloud broker for cross-network connectivity
 
-  // Attempt WebSocket connection to ESP32
+  // Attempt WebSocket connection to ESP32 (if local IP configured)
   if (CONFIG.ESP32_IP !== '192.168.1.100') {
     connectWebSocket();
   } else {
-    console.warn('[CONFIG] ESP32_IP not set — entering Demo Mode');
+    console.warn('[CONFIG] Local ESP32_IP not set — connecting via MQTT / Cloud');
     if (CONFIG.DEMO_MODE) startDemo();
     else updateConnectionBadge('disconnected');
   }

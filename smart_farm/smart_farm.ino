@@ -32,6 +32,10 @@
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <SD.h>
+#include <PubSubClient.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <Preferences.h>
 #include "config.h"
 
 // ----------------------------------------------------------
@@ -41,6 +45,10 @@ DHT dht(DHT_PIN, DHT_TYPE);
 RTC_DS3231    rtc;
 WebServer     httpServer(HTTP_PORT);
 WebSocketsServer webSocket(WS_PORT);
+
+// MQTT Client (Remote Cross-Network Control)
+WiFiClient   mqttWifiClient;
+PubSubClient mqttClient(mqttWifiClient);
 
 // ----------------------------------------------------------
 // Global State
@@ -289,9 +297,128 @@ String buildJSON() {
 }
 
 void broadcastState() {
-  if (connectedClients == 0) return;
   String json = buildJSON();
-  webSocket.broadcastTXT(json);
+  if (connectedClients > 0) {
+    webSocket.broadcastTXT(json);
+  }
+  if (mqttClient.connected()) {
+    mqttClient.publish(MQTT_TOPIC_TELEMETRY, json.c_str(), false);
+  }
+}
+
+// ----------------------------------------------------------
+// Supabase Direct REST API (Cloud Database Logging)
+// ----------------------------------------------------------
+void postToSupabase() {
+#if defined(SUPABASE_ENABLED) && SUPABASE_ENABLED
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClientSecure client;
+  client.setInsecure(); // Skip certificate validation for convenience
+
+  HTTPClient http;
+  String url = String(SUPABASE_URL) + "/rest/v1/sensor_readings";
+  if (http.begin(client, url)) {
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("apikey", SUPABASE_ANON_KEY);
+    http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
+    http.addHeader("Prefer", "return=minimal");
+
+    StaticJsonDocument<512> doc;
+    doc["temperature"]   = round(state.temperature * 10.0) / 10.0;
+    doc["humidity"]      = round(state.humidity * 10.0) / 10.0;
+    doc["soil_moisture"] = state.soilMoisture;
+    doc["soil_raw"]      = state.soilRaw;
+    doc["tank_full"]     = state.tankFull;
+    doc["pump_state"]    = state.pumpState;
+    doc["auto_mode"]     = state.autoMode;
+
+    String json;
+    serializeJson(doc, json);
+
+    int httpCode = http.POST(json);
+    if (httpCode == 201 || httpCode == 200 || httpCode == 204) {
+      Serial.println("[SUPABASE] Telemetry logged to cloud database!");
+    } else {
+      Serial.printf("[SUPABASE] POST failed, HTTP status: %d\n", httpCode);
+    }
+    http.end();
+  }
+#endif
+}
+
+// ----------------------------------------------------------
+// Command Processor (Shared by WebSockets and MQTT)
+// ----------------------------------------------------------
+void processCommandJSON(StaticJsonDocument<384>& cmd) {
+  String action = cmd["action"] | "";
+
+  if (action == "pump_on") {
+    state.autoMode = false;   // Switch to manual
+    bool force = cmd.containsKey("force") && cmd["force"].as<bool>();
+    setPump(true, force);
+    Serial.printf("[CMD] Manual pump ON%s\n", force ? " (FORCE — tank guard bypassed)" : "");
+  } else if (action == "pump_off") {
+    setPump(false);
+    Serial.println("[CMD] Manual pump OFF");
+  } else if (action == "set_auto") {
+    bool newAutoMode = cmd["value"].as<bool>();
+    if (!newAutoMode && state.autoMode && state.pumpState) {
+      Serial.println("[CMD] Switched to MANUAL — stopping auto-run pump");
+      setPump(false);
+    }
+    state.autoMode = newAutoMode;
+    Serial.printf("[CMD] Mode: %s\n", state.autoMode ? "AUTO" : "MANUAL");
+  } else if (action == "set_thresholds") {
+    if (cmd.containsKey("moisture_low"))      rt_moistureLow    = cmd["moisture_low"].as<int>();
+    if (cmd.containsKey("moisture_high"))     rt_moistureHigh   = cmd["moisture_high"].as<int>();
+    if (cmd.containsKey("temp_heat"))         rt_tempHeat       = cmd["temp_heat"].as<float>();
+    if (cmd.containsKey("temp_frost"))        rt_tempFrost      = cmd["temp_frost"].as<float>();
+    if (cmd.containsKey("humid_low"))         rt_humidLow       = cmd["humid_low"].as<float>();
+    if (cmd.containsKey("humid_high"))        rt_humidHigh      = cmd["humid_high"].as<float>();
+    if (cmd.containsKey("pump_max_min"))      rt_pumpMaxMs      = (unsigned long)cmd["pump_max_min"].as<int>() * 60000UL;
+    if (cmd.containsKey("pump_cool_min"))     rt_pumpCoolMs     = (unsigned long)cmd["pump_cool_min"].as<int>() * 60000UL;
+    if (cmd.containsKey("sensor_interval_s")) rt_sensorInterval = (unsigned long)cmd["sensor_interval_s"].as<int>() * 1000UL;
+    if (cmd.containsKey("sd_interval_s"))     rt_sdLogInterval  = (unsigned long)cmd["sd_interval_s"].as<int>() * 1000UL;
+    if (cmd.containsKey("tank_guard"))        rt_tankGuardEnabled = cmd["tank_guard"].as<bool>();
+
+    Serial.printf("[THRESHOLDS] Updated: soil=%d%%/%d%% temp=%.1f/%.1f hum=%.1f/%.1f pumpMax=%lums cool=%lums guard=%s\n",
+      rt_moistureLow, rt_moistureHigh,
+      rt_tempHeat, rt_tempFrost,
+      rt_humidLow, rt_humidHigh,
+      rt_pumpMaxMs, rt_pumpCoolMs,
+      rt_tankGuardEnabled ? "ON" : "OFF");
+  } else {
+    Serial.println("[CMD] Unknown action: " + action);
+  }
+
+  broadcastState();
+}
+
+// ----------------------------------------------------------
+// MQTT Connection & Callback (Remote Cross-Network Control)
+// ----------------------------------------------------------
+void connectMQTT() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  Serial.printf("[MQTT] Connecting to %s:%d as %s...\n", MQTT_BROKER, MQTT_PORT, MQTT_CLIENT_ID);
+  if (mqttClient.connect(MQTT_CLIENT_ID)) {
+    Serial.println("[MQTT] Connected successfully!");
+    mqttClient.subscribe(MQTT_TOPIC_CONTROL);
+    Serial.println("[MQTT] Subscribed to topic: " + String(MQTT_TOPIC_CONTROL));
+  } else {
+    Serial.printf("[MQTT] Connection failed, state=%d\n", mqttClient.state());
+  }
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.printf("[MQTT] Message on %s (%u bytes)\n", topic, length);
+  StaticJsonDocument<384> cmd;
+  DeserializationError err = deserializeJson(cmd, payload, length);
+  if (!err) {
+    processCommandJSON(cmd);
+  } else {
+    Serial.println("[MQTT] JSON parse error");
+  }
 }
 
 // ----------------------------------------------------------
@@ -303,7 +430,6 @@ void onWebSocketEvent(uint8_t clientId, WStype_t type,
     case WStype_CONNECTED:
       connectedClients++;
       Serial.printf("[WS] Client #%d connected. Total: %d\n", clientId, connectedClients);
-      // Send current state immediately to new client
       { String json = buildJSON(); webSocket.sendTXT(clientId, json); }
       break;
 
@@ -313,62 +439,13 @@ void onWebSocketEvent(uint8_t clientId, WStype_t type,
       break;
 
     case WStype_TEXT: {
-      // Parse incoming command JSON
       StaticJsonDocument<384> cmd;
       DeserializationError err = deserializeJson(cmd, payload, length);
-      if (err) { Serial.println("[WS] JSON parse error"); break; }
-
-      // Command: { "action": "pump_on" }
-      // Command: { "action": "pump_off" }
-      // Command: { "action": "set_auto", "value": true/false }
-      String action = cmd["action"].as<String>();
-
-      if (action == "pump_on") {
-        state.autoMode = false;   // Switch to manual
-        {
-          bool force = cmd.containsKey("force") && cmd["force"].as<bool>();
-          setPump(true, force);
-          Serial.printf("[CMD] Manual pump ON%s\n", force ? " (FORCE — tank guard bypassed)" : "");
-        }
-      } else if (action == "pump_off") {
-        setPump(false);
-        Serial.println("[CMD] Manual pump OFF");
-      } else if (action == "set_auto") {
-        bool newAutoMode = cmd["value"].as<bool>();
-        // Switching TO manual: stop pump if auto had it running
-        if (!newAutoMode && state.autoMode && state.pumpState) {
-          Serial.println("[CMD] Switched to MANUAL — stopping auto-run pump");
-          setPump(false);
-        }
-        state.autoMode = newAutoMode;
-        Serial.printf("[CMD] Mode: %s\n", state.autoMode ? "AUTO" : "MANUAL");
-
-      } else if (action == "set_thresholds") {
-        // ------ Update runtime KPI thresholds from dashboard settings ------
-        if (cmd.containsKey("moisture_low"))      rt_moistureLow    = cmd["moisture_low"].as<int>();
-        if (cmd.containsKey("moisture_high"))     rt_moistureHigh   = cmd["moisture_high"].as<int>();
-        if (cmd.containsKey("temp_heat"))         rt_tempHeat       = cmd["temp_heat"].as<float>();
-        if (cmd.containsKey("temp_frost"))        rt_tempFrost      = cmd["temp_frost"].as<float>();
-        if (cmd.containsKey("humid_low"))         rt_humidLow       = cmd["humid_low"].as<float>();
-        if (cmd.containsKey("humid_high"))        rt_humidHigh      = cmd["humid_high"].as<float>();
-        if (cmd.containsKey("pump_max_min"))      rt_pumpMaxMs      = (unsigned long)cmd["pump_max_min"].as<int>() * 60000UL;
-        if (cmd.containsKey("pump_cool_min"))     rt_pumpCoolMs     = (unsigned long)cmd["pump_cool_min"].as<int>() * 60000UL;
-        if (cmd.containsKey("sensor_interval_s")) rt_sensorInterval = (unsigned long)cmd["sensor_interval_s"].as<int>() * 1000UL;
-        if (cmd.containsKey("sd_interval_s"))     rt_sdLogInterval  = (unsigned long)cmd["sd_interval_s"].as<int>() * 1000UL;
-        if (cmd.containsKey("tank_guard"))        rt_tankGuardEnabled = cmd["tank_guard"].as<bool>();
-
-        Serial.printf("[THRESHOLDS] Updated: soil=%d%%/%d%% temp=%.1f/%.1f hum=%.1f/%.1f pumpMax=%lums cool=%lums guard=%s\n",
-          rt_moistureLow, rt_moistureHigh,
-          rt_tempHeat, rt_tempFrost,
-          rt_humidLow, rt_humidHigh,
-          rt_pumpMaxMs, rt_pumpCoolMs,
-          rt_tankGuardEnabled ? "ON" : "OFF");
-
+      if (!err) {
+        processCommandJSON(cmd);
       } else {
-        Serial.println("[WS] Unknown command: " + action);
+        Serial.println("[WS] JSON parse error");
       }
-      // Broadcast updated state
-      broadcastState();
       break;
     }
 
@@ -378,27 +455,89 @@ void onWebSocketEvent(uint8_t clientId, WStype_t type,
 }
 
 // ----------------------------------------------------------
-// HTTP Server: Serve dashboard and API
+// HTTP Server: Dashboard, API & WiFi Onboarding Portal
 // ----------------------------------------------------------
 void setupHTTPRoutes() {
-  // Serve the main dashboard HTML (stored in SPIFFS or inline)
   httpServer.on("/", HTTP_GET, []() {
     httpServer.sendHeader("Access-Control-Allow-Origin", "*");
-    // If not using SPIFFS, respond with a redirect hint
     httpServer.send(200, "text/html",
-      "<html><head><meta http-equiv='refresh' content='0; url=http://" +
-      WiFi.localIP().toString() +
-      "/dashboard'></head></html>");
+      "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+      "<title>SmartFarm Controller</title><style>body{font-family:sans-serif;background:#020b05;color:#e2e8f0;padding:20px;text-align:center;}"
+      "a{color:#22c55e;font-weight:bold;text-decoration:none;}.box{background:#0a1a0f;border:1px solid #16381e;padding:20px;border-radius:12px;max-width:400px;margin:30px auto;}</style></head>body>"
+      "<div class='box'><h2>🌱 SmartFarm IoT Controller</h2>"
+      "<p>Connected IP: " + WiFi.localIP().toString() + "</p>"
+      "<p><a href='/wifi'>⚙️ Configure Wi-Fi Network</a></p>"
+      "</div></body></html>");
   });
 
-  // JSON API endpoint for initial data fetch
+  // WiFi Onboarding Web Page (for connecting to new Wi-Fi network)
+  httpServer.on("/wifi", HTTP_GET, []() {
+    httpServer.sendHeader("Access-Control-Allow-Origin", "*");
+    String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+                  "<title>SmartFarm Wi-Fi Setup</title><style>"
+                  "body{font-family:sans-serif;background:#020b05;color:#e2e8f0;padding:20px;margin:0;}"
+                  ".card{background:#0a1a0f;border:1px solid #16381e;padding:24px;border-radius:12px;max-width:400px;margin:20px auto;box-shadow:0 10px 25px rgba(0,0,0,0.5);}"
+                  "h2{color:#22c55e;margin-top:0;}label{display:block;margin-top:12px;font-size:0.9rem;color:#94a3b8;}"
+                  "input{width:100%;padding:10px;margin-top:6px;border-radius:6px;border:1px solid #1e293b;background:#0f172a;color:#fff;box-sizing:border-box;}"
+                  "button{width:100%;padding:12px;margin-top:20px;border:none;border-radius:6px;background:#22c55e;color:#000;font-weight:bold;cursor:pointer;}"
+                  ".note{font-size:0.8rem;color:#64748b;margin-top:14px;line-height:1.4;}"
+                  "</style></head><body><div class='card'>"
+                  "<h2>📶 Wi-Fi Onboarding</h2>"
+                  "<p style='font-size:0.85rem;color:#cbd5e1;'>Connect SmartFarm ESP32 to your local Wi-Fi router.</p>"
+                  "<form action='/api/wifi' method='POST'>"
+                  "<label>Wi-Fi Network Name (SSID):</label>"
+                  "<input type='text' name='ssid' placeholder='Enter SSID' required>"
+                  "<label>Wi-Fi Password:</label>"
+                  "<input type='password' name='pass' placeholder='Enter Password'>"
+                  "<button type='submit'>Save &amp; Connect</button>"
+                  "</form>"
+                  "<div class='note'>Upon saving, ESP32 will reboot and connect to the new Wi-Fi network.</div>"
+                  "</div></body></html>";
+    httpServer.send(200, "text/html", html);
+  });
+
+  // Save new Wi-Fi credentials via Form or API
+  httpServer.on("/api/wifi", HTTP_POST, []() {
+    String newSsid = httpServer.arg("ssid");
+    String newPass = httpServer.arg("pass");
+
+    if (newSsid.length() > 0) {
+      Preferences pref;
+      pref.begin("smartfarm", false);
+      pref.putString("ssid", newSsid);
+      pref.putString("pass", newPass);
+      pref.end();
+
+      httpServer.send(200, "text/html",
+        "<html><body style='background:#020b05;color:#22c55e;font-family:sans-serif;padding:30px;text-align:center;'>"
+        "<h2>✅ Wi-Fi Credentials Saved!</h2>"
+        "<p style='color:#e2e8f0;'>Connecting to <b>" + newSsid + "</b>... ESP32 is restarting.</p>"
+        "</body></html>");
+      delay(1500);
+      ESP.restart();
+    } else {
+      httpServer.send(400, "text/plain", "Missing SSID");
+    }
+  });
+
+  // Reset Wi-Fi credentials back to secrets.h default
+  httpServer.on("/api/wifi/reset", HTTP_POST, []() {
+    Preferences pref;
+    pref.begin("smartfarm", false);
+    pref.clear();
+    pref.end();
+    httpServer.send(200, "text/plain", "Wi-Fi credentials reset. Restarting...");
+    delay(1000);
+    ESP.restart();
+  });
+
+  // JSON API status endpoint
   httpServer.on("/api/status", HTTP_GET, []() {
     httpServer.sendHeader("Access-Control-Allow-Origin", "*");
     httpServer.sendHeader("Content-Type", "application/json");
     httpServer.send(200, "application/json", buildJSON());
   });
 
-  // Health check
   httpServer.on("/api/health", HTTP_GET, []() {
     httpServer.send(200, "text/plain", "OK");
   });
@@ -419,7 +558,6 @@ void initSDCard() {
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
 
   if (!SD.begin(SD_CS_PIN)) {
-    // SD card not present or wiring issue — continue without it
     state.sdAvailable = false;
     state.sdLogging   = false;
     Serial.println("[SD] Not found or mount failed — SD logging disabled");
@@ -433,7 +571,6 @@ void initSDCard() {
   uint64_t cardSize = SD.cardSize() / (1024 * 1024);
   Serial.printf("[SD] Mounted successfully. Card size: %lluMB\n", cardSize);
 
-  // Write CSV header if file doesn't exist yet
   if (!SD.exists(SD_LOG_FILENAME)) {
     File f = SD.open(SD_LOG_FILENAME, FILE_WRITE);
     if (f) {
@@ -449,7 +586,7 @@ void initSDCard() {
 }
 
 void logToSD() {
-  if (!state.sdAvailable) return;  // SD absent — skip silently
+  if (!state.sdAvailable) return;
 
   File f = SD.open(SD_LOG_FILENAME, FILE_APPEND);
   if (!f) {
@@ -458,7 +595,6 @@ void logToSD() {
     return;
   }
 
-  // CSV row: Date,Time,Soil%,Temp,Hum,Tank,Pump,Mode
   f.printf("%s,%s,%d,%.1f,%.1f,%s,%s,%s\n",
     state.datestamp.c_str(),
     state.timestamp.c_str(),
@@ -477,12 +613,18 @@ void logToSD() {
 }
 
 // ----------------------------------------------------------
-// WiFi Connection
+// WiFi Connection & Onboarding AP Fallback
 // ----------------------------------------------------------
 void connectWiFi() {
-  Serial.printf("[WiFi] Connecting to %s", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Preferences pref;
+  pref.begin("smartfarm", true);
+  String targetSsid = pref.getString("ssid", WIFI_SSID);
+  String targetPass = pref.getString("pass", WIFI_PASSWORD);
+  pref.end();
+
+  Serial.printf("[WiFi] Connecting to network '%s'...", targetSsid.c_str());
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(targetSsid.c_str(), targetPass.c_str());
 
   int retries = 0;
   while (WiFi.status() != WL_CONNECTED && retries < 30) {
@@ -492,17 +634,13 @@ void connectWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WiFi] Connected!");
-    Serial.print("[WiFi] IP Address: ");
-    Serial.println(WiFi.localIP());
-    Serial.printf("[WiFi] Dashboard: http://%s\n", WiFi.localIP().toString().c_str());
-    Serial.printf("[WiFi] WebSocket: ws://%s:%d\n", WiFi.localIP().toString().c_str(), WS_PORT);
+    Serial.println("\n[WiFi] Connected successfully!");
+    Serial.printf("[WiFi] IP Address: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("[WiFi] Setup Portal: http://%s/wifi\n", WiFi.localIP().toString().c_str());
   } else {
-    Serial.println("\n[WiFi] Connection FAILED — operating offline");
-    // Could start AP mode here for local configuration
-    WiFi.mode(WIFI_AP);
+    Serial.println("\n[WiFi] Could not connect to router — Starting Access Point mode...");
     WiFi.softAP("SmartFarm_Setup", "farm12345");
-    Serial.printf("[WiFi] AP mode: connect to 'SmartFarm_Setup' -> %s\n",
+    Serial.printf("[WiFi AP] Connect to Wi-Fi 'SmartFarm_Setup' (pass: farm12345) -> http://%s/wifi\n",
                   WiFi.softAPIP().toString().c_str());
   }
 }
@@ -587,11 +725,20 @@ void setup() {
   webSocket.onEvent(onWebSocketEvent);
   Serial.println("[WS] WebSocket server started on port " + String(WS_PORT));
 
+  // Initialize & Connect MQTT
+  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  mqttClient.setBufferSize(768);
+  if (WiFi.status() == WL_CONNECTED) {
+    connectMQTT();
+  }
+
   // Start HTTP server
   setupHTTPRoutes();
 
-  // First sensor read
+  // First sensor read & Supabase post
   readSensors();
+  postToSupabase();
 
   // Blink LED to signal ready
   for (int i = 0; i < 3; i++) {
@@ -612,6 +759,26 @@ void loop() {
 
   unsigned long now = millis();
 
+  // --- MQTT Reconnect & Event Loop ---
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!mqttClient.connected()) {
+      static unsigned long lastMqttAttempt = 0;
+      if (now - lastMqttAttempt >= MQTT_RECONNECT_MS) {
+        lastMqttAttempt = now;
+        connectMQTT();
+      }
+    } else {
+      mqttClient.loop();
+    }
+  }
+
+  // --- Supabase Direct Cloud Log (every 60 seconds) ---
+  static unsigned long lastSupabasePost = 0;
+  if (now - lastSupabasePost >= SUPABASE_POST_INTERVAL_MS) {
+    lastSupabasePost = now;
+    postToSupabase();
+  }
+
   // --- Sensor Read Cycle ---
   if (now - lastSensorRead >= rt_sensorInterval) {
     lastSensorRead = now;
@@ -621,7 +788,7 @@ void loop() {
     handlePumpSafety();
     autoIrrigationLogic();
 
-    // Broadcast to all WebSocket clients
+    // Broadcast to all WebSocket and MQTT subscribers
     broadcastState();
 
     // Visual indication: blink LED when pump is running
