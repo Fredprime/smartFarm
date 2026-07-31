@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SmartFarm IoT — Admin Authentication</title>
+  <meta name="description" content="Secure login for SmartFarm IoT Industrial Monitoring & Control Dashboard" />
+  <meta name="theme-color" content="#020b05" />
+
+  <!-- Favicon -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌱</text></svg>" />
+
+  <!-- Base Dashboard Styles -->
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Supabase JS Client v2 CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase_config.js"></script>
+
+  <style>
+    .login-wrapper {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      position: relative;
+      z-index: 2;
+    }
+
+    .login-card {
+      width: 100%;
+      max-width: 420px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 2.5rem 2rem;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6), 0 0 1px rgba(34, 197, 94, 0.3);
+      backdrop-filter: blur(12px);
+    }
+
+    .login-header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+
+    .login-logo {
+      font-size: 3rem;
+      margin-bottom: 0.5rem;
+      display: inline-block;
+      filter: drop-shadow(0 0 12px rgba(34, 197, 94, 0.4));
+    }
+
+    .login-title {
+      font-size: 1.5rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 0.25rem;
+      letter-spacing: -0.02em;
+    }
+
+    .login-subtitle {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .form-group {
+      margin-bottom: 1.25rem;
+    }
+
+    .form-label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      margin-bottom: 0.5rem;
+    }
+
+    .form-input {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      background: rgba(10, 25, 14, 0.6);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      color: var(--text-primary);
+      font-family: inherit;
+      font-size: 0.95rem;
+      transition: all 0.2s ease;
+    }
+
+    .form-input:focus {
+      outline: none;
+      border-color: var(--green-accent);
+      box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.15);
+      background: rgba(10, 30, 16, 0.8);
+    }
+
+    .btn-login {
+      width: 100%;
+      padding: 0.85rem 1rem;
+      background: linear-gradient(135deg, var(--green-accent), #16a34a);
+      color: #020b05;
+      font-weight: 700;
+      font-size: 0.95rem;
+      border: none;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 12px rgba(34, 197, 94, 0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      margin-top: 1.5rem;
+    }
+
+    .btn-login:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(34, 197, 94, 0.35);
+      filter: brightness(1.08);
+    }
+
+    .btn-login:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .auth-error {
+      background: rgba(244, 63, 94, 0.12);
+      border: 1px solid rgba(244, 63, 94, 0.3);
+      color: #fca5a5;
+      padding: 0.75rem 1rem;
+      border-radius: var(--radius-md);
+      font-size: 0.85rem;
+      margin-bottom: 1.25rem;
+      display: none;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .auth-error.visible {
+      display: flex;
+    }
+
+    .login-footer {
+      margin-top: 2rem;
+      text-align: center;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+      padding-top: 1rem;
+    }
+
+    .bypass-note {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      background: rgba(234, 179, 8, 0.08);
+      border: 1px solid rgba(234, 179, 8, 0.2);
+      border-radius: var(--radius-md);
+      font-size: 0.78rem;
+      color: #fde047;
+      text-align: center;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+
+<body>
+  <!-- Animated background layers -->
+  <div class="bg-grid" aria-hidden="true"></div>
+  <div class="bg-orbs" aria-hidden="true"></div>
+
+  <div class="login-wrapper">
+    <div class="login-card">
+      <div class="login-header">
+        <div class="login-logo">🌿</div>
+        <h1 class="login-title">SmartFarm IoT</h1>
+        <p class="login-subtitle">SCADA Controller &amp; Telemetry Access</p>
+      </div>
+
+      <div id="auth-error" class="auth-error" role="alert">
+        <span>⚠️</span>
+        <span id="error-message">Invalid login credentials</span>
+      </div>
+
+      <form id="login-form" onsubmit="handleLogin(event)">
+        <div class="form-group">
+          <label for="email" class="form-label">Email Address</label>
+          <input
+            type="email"
+            id="email"
+            class="form-input"
+            placeholder="admin@smartfarm.local"
+            required
+            autocomplete="email"
+          />
+        </div>
+
+        <div class="form-group">
+          <label for="password" class="form-label">Password</label>
+          <input
+            type="password"
+            id="password"
+            class="form-input"
+            placeholder="••••••••••••"
+            required
+            autocomplete="current-password"
+          />
+        </div>
+
+        <button type="submit" id="btn-submit" class="btn-login">
+          <span id="btn-text">Sign In to Controller</span>
+        </button>
+      </form>
+
+      <div id="anon-key-warning" class="bypass-note" style="display: none;">
+        ⚡ <strong>Supabase Setup Mode</strong><br/>
+        Enter your Supabase Anon Key in <code>supabase_config.js</code> to enable remote authentication &amp; cloud logging.
+      </div>
+
+      <div class="login-footer">
+        SmartFarm IoT SCADA System &middot; Protected System
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const client = initSupabase();
+
+    // Check if user is already logged in
+    async function checkExistingSession() {
+      if (!client) {
+        // Show setup warning if anonKey is default
+        document.getElementById('anon-key-warning').style.display = 'block';
+        return;
+      }
+      try {
+        const { data: { session } } = await client.auth.getSession();
+        if (session) {
+          window.location.href = 'index.html';
+        }
+      } catch (err) {
+        console.error('Session check failed:', err);
+      }
+    }
+
+    async function handleLogin(e) {
+      e.preventDefault();
+      const email = document.getElementById('email').value.trim();
+      const password = document.getElementById('password').value;
+      const errorDiv = document.getElementById('auth-error');
+      const errorMsg = document.getElementById('error-message');
+      const btnSubmit = document.getElementById('btn-submit');
+      const btnText = document.getElementById('btn-text');
+
+      errorDiv.classList.remove('visible');
+
+      if (!client) {
+        errorMsg.textContent = 'Please configure YOUR_SUPABASE_ANON_KEY in supabase_config.js before logging in.';
+        errorDiv.classList.add('visible');
+        return;
+      }
+
+      btnSubmit.disabled = true;
+      btnText.textContent = 'Authenticating…';
+
+      try {
+        const { data, error } = await client.auth.signInWithPassword({
+          email: email,
+          password: password,
+        });
+
+        if (error) {
+          errorMsg.textContent = error.message || 'Authentication failed.';
+          errorDiv.classList.add('visible');
+          btnSubmit.disabled = false;
+          btnText.textContent = 'Sign In to Controller';
+        } else if (data.session) {
+          btnText.textContent = 'Success! Redirecting…';
+          setTimeout(() => {
+            window.location.href = 'index.html';
+          }, 400);
+        }
+      } catch (err) {
+        errorMsg.textContent = 'An unexpected error occurred. Please try again.';
+        errorDiv.classList.add('visible');
+        btnSubmit.disabled = false;
+        btnText.textContent = 'Sign In to Controller';
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', checkExistingSession);
+  </script>
+</body>
+</html>
