@@ -15,7 +15,6 @@ const CONFIG = {
   MAX_LOG:    100,               // Max log table rows
   MAX_CHART:  20,                // Data points per chart
   RECONNECT_DELAY: 3000,        // ms between reconnect attempts
-  DEMO_MODE:  false,            // false by default for live hardware monitoring
 };
 
 // ----------------------------------------------------------
@@ -35,7 +34,6 @@ const state = {
   },
   logRows:      [],
   reconnectTimer: null,
-  demoInterval:   null,
   lastData:       null,
 };
 
@@ -58,7 +56,6 @@ function connectWebSocket() {
     console.log('[WS] Connected to ESP32');
     state.connected = true;
     updateConnectionBadge('connected');
-    stopDemo();
     clearReconnectTimer();
     // Send browser settings/KPI thresholds to ESP32 on connection
     sendSettingsToESP32();
@@ -77,7 +74,6 @@ function connectWebSocket() {
     console.warn('[WS] Disconnected:', event.code, event.reason);
     state.connected = false;
     updateConnectionBadge('disconnected');
-    if (CONFIG.DEMO_MODE) startDemo();
     scheduleReconnect();
   };
 
@@ -135,7 +131,6 @@ function initMQTT() {
         try {
           const data = JSON.parse(payload.toString());
           state.connected = true;
-          stopDemo();
           updateConnectionBadge('connected', 'ESP32 Connected (Cloud)');
           processData(data);
         } catch (e) {
@@ -180,14 +175,7 @@ function sendCommand(payload) {
   }
 
   if (!sent) {
-    console.warn('[CMD] Not connected to WS or MQTT — fallback');
-    if (CONFIG.DEMO_MODE) {
-      if (payload.action === 'pump_on')        state.pumpState = true;
-      else if (payload.action === 'pump_off')  state.pumpState = false;
-      else if (payload.action === 'set_auto')  state.autoMode  = payload.value;
-      updatePumpUI(state.pumpState);
-      updateModeUI(state.autoMode);
-    }
+    console.warn('[CMD] Not connected to WS or MQTT');
   }
 }
 
@@ -222,7 +210,6 @@ function updateConnectionBadge(status, customText = null) {
     connecting:   'Connecting…',
     connected:    'Connected',
     disconnected: 'Disconnected',
-    demo:         'Demo Mode',
   };
 
   text.textContent = customText || labels[status] || status;
@@ -231,12 +218,7 @@ function updateConnectionBadge(status, customText = null) {
   dot.className = 'dot' + (status === 'connecting' ? ' pulse' : '');
   
   // Custom styling to match theme color schemes
-  if (status === 'demo') {
-    badge.style.borderColor = 'rgba(251,191,36,0.35)';
-    badge.style.color       = '#fbbf24';
-    dot.style.background    = '#fbbf24';
-    dot.style.animation     = 'none';
-  } else if (status === 'connecting') {
+  if (status === 'connecting') {
     badge.style.borderColor = 'rgba(34,197,94,0.15)';
     badge.style.color       = 'var(--text-secondary)';
     dot.style.background    = 'var(--green-400)';
@@ -929,118 +911,7 @@ function getLocalTime() {
   return `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`;
 }
 
-// ----------------------------------------------------------
-// Demo Mode (simulated data when ESP32 not connected)
-// ----------------------------------------------------------
-let demoSoil    = 45;
-let demoTemp    = 24.5;
-let demoHumid   = 62.0;
-let demoSeconds = 0;
 
-function generateDemoData() {
-  demoSeconds += 5;
-
-  // Simulate soil drying out slowly unless pump is on
-  if (state.pumpState) {
-    demoSoil = Math.min(85, demoSoil + 3.5);
-  } else {
-    demoSoil = Math.max(5, demoSoil - 1.2);
-  }
-
-  // Tank level switch simulation
-  const simTankFull = demoSoil > 15;
-
-  // Tank Level Guard safety logic in demo
-  if (SETTINGS.tankGuard && !simTankFull && state.pumpState) {
-    state.pumpState = false;
-    updatePumpUI(false);
-    console.log('[DEMO] Pump emergency shutoff: tank empty (guard active)');
-  }
-
-  // Auto-irrigation logic in demo (uses dynamic settings thresholds)
-  if (state.autoMode) {
-    if (!state.pumpState && demoSoil < SETTINGS.moistureLow && (!SETTINGS.tankGuard || simTankFull)) {
-      state.pumpState = true;
-      updatePumpUI(true);
-    } else if (state.pumpState && demoSoil >= SETTINGS.moistureHigh) {
-      state.pumpState = false;
-      updatePumpUI(false);
-    }
-  }
-
-  demoTemp  += (Math.random() - 0.5) * 0.8;
-  demoHumid += (Math.random() - 0.5) * 1.5;
-  demoTemp   = Math.max(10, Math.min(45, demoTemp));
-  demoHumid  = Math.max(15, Math.min(95, demoHumid));
-
-  const now     = new Date();
-  const alerts  = [];
-  let alertCount = 0;
-
-  // Alert generation (uses dynamic settings thresholds)
-  if (demoSoil < SETTINGS.moistureLow) { 
-    alerts.push('DROUGHT RISK: Soil moisture critically low (' + Math.round(demoSoil) + '%)'); 
-    alertCount++; 
-  }
-  if (demoTemp > SETTINGS.tempHeat) { 
-    alerts.push('HEAT STRESS: Temperature ' + demoTemp.toFixed(1) + '°C exceeds safe limit'); 
-    alertCount++; 
-  }
-  if (demoTemp < SETTINGS.tempFrost) { 
-    alerts.push('FROST WARNING: Temperature ' + demoTemp.toFixed(1) + '°C near freezing'); 
-    alertCount++; 
-  }
-  if (demoHumid < SETTINGS.humidLow) { 
-    alerts.push('LOW HUMIDITY: ' + demoHumid.toFixed(1) + '% — increased evaporation rate'); 
-    alertCount++; 
-  }
-  if (demoHumid > SETTINGS.humidHigh) { 
-    alerts.push('DISEASE RISK: Humidity ' + demoHumid.toFixed(1) + '% — fungal risk elevated'); 
-    alertCount++; 
-  }
-  if (!simTankFull) {
-    alerts.push('TANK EMPTY: Water reservoir low — refill required');
-    alertCount++;
-  }
-
-  const demoPayload = {
-    temperature:  parseFloat(demoTemp.toFixed(1)),
-    humidity:     parseFloat(demoHumid.toFixed(1)),
-    soilMoisture: Math.round(demoSoil),
-    soilRaw:      Math.round(1000 + (100 - demoSoil) * 28),
-    tankFull:     demoSoil > 15,   // Simulate tank emptying as soil dries very low
-    pumpState:    state.pumpState,
-    autoMode:     state.autoMode,
-    timestamp:    `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}`,
-    datestamp:    `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`,
-    alerts,
-    alertCount,
-    sdAvailable:  false,    // Demo: no SD card simulated
-    sdLogging:    false,
-  };
-
-  processData(demoPayload);
-}
-
-function startDemo() {
-  if (state.demoInterval) return;
-  console.log('[DEMO] Starting simulated data feed');
-  
-  // Set connection badge to demo status cleanly without overwriting DOM structure
-  updateConnectionBadge('demo');
-
-  // Immediately generate first data point
-  generateDemoData();
-  state.demoInterval = setInterval(generateDemoData, 5000);
-}
-
-function stopDemo() {
-  if (state.demoInterval) {
-    clearInterval(state.demoInterval);
-    state.demoInterval = null;
-    console.log('[DEMO] Stopped — connected to ESP32');
-  }
-}
 
 // ----------------------------------------------------------
 // Helper: animate number value change
@@ -1075,7 +946,6 @@ document.addEventListener('DOMContentLoaded', () => {
     connectWebSocket();
   } else {
     updateConnectionBadge('connecting', 'Connecting to Cloud MQTT…');
-    if (CONFIG.DEMO_MODE) startDemo();
   }
 });
 
@@ -1106,7 +976,6 @@ const SETTINGS_DEFAULTS = {
   tankGuard:     true,    // true = shutoff pump if tank empty (float sensor)
   esp32Ip:   CONFIG.ESP32_IP,
   wsPort:    CONFIG.WS_PORT,
-  demoMode:  CONFIG.DEMO_MODE,
   autoReconnect: true,
 };
 
@@ -1172,10 +1041,8 @@ function applySettingsToUI() {
   if (portEl) portEl.value = SETTINGS.wsPort;
 
   // Toggles
-  const demoEl      = document.getElementById('toggle-demo');
   const reconnectEl = document.getElementById('toggle-reconnect');
   const guardEl     = document.getElementById('toggle-tank-guard');
-  if (demoEl)      demoEl.checked      = SETTINGS.demoMode;
   if (reconnectEl) reconnectEl.checked = SETTINGS.autoReconnect;
   if (guardEl)     guardEl.checked     = SETTINGS.tankGuard;
 
@@ -1187,9 +1054,8 @@ function applySettingsToUI() {
   if (aboutWs) aboutWs.textContent = `ws://${SETTINGS.esp32Ip}:${SETTINGS.wsPort}`;
 }
 
-// --- Apply settings to in-memory runtime (demo mode alert logic, CONFIG) ---
+// --- Apply settings to in-memory runtime (CONFIG) ---
 function applySettingsToRuntime() {
-  CONFIG.DEMO_MODE     = SETTINGS.demoMode;
   CONFIG.ESP32_IP      = SETTINGS.esp32Ip;
   CONFIG.WS_PORT       = SETTINGS.wsPort;
   CONFIG.MAX_LOG       = SETTINGS.maxLog;
@@ -1257,7 +1123,6 @@ function onSlider(key, rawValue, suffix) {
 // --- Toggle handler ---
 function onToggle(key, checked) {
   const keyMap = { 
-    demo: 'demoMode', 
     reconnect: 'autoReconnect',
     'tank-guard': 'tankGuard'
   };
@@ -1320,7 +1185,6 @@ function saveAndApplySettings() {
   if (ipOrPortChanged) {
     // IP/Port changed: Close old connection and establish new one
     console.log('[SETTINGS] IP or Port changed. Reconnecting...');
-    stopDemo();
     if (state.ws) {
       state.ws.onclose = null;
       state.ws.onerror = null;
@@ -1333,8 +1197,6 @@ function saveAndApplySettings() {
     if (SETTINGS.esp32Ip && SETTINGS.esp32Ip !== '192.168.1.100') {
       updateConnectionBadge('connecting');
       connectWebSocket();
-    } else if (SETTINGS.demoMode) {
-      startDemo();
     } else {
       updateConnectionBadge('disconnected');
     }
@@ -1344,17 +1206,10 @@ function saveAndApplySettings() {
       // Already connected: transmit the settings to the ESP32 directly!
       sendSettingsToESP32();
     } else {
-      // Not connected currently: check if demo mode toggle changed
-      if (SETTINGS.demoMode) {
-        startDemo();
+      if (SETTINGS.esp32Ip && SETTINGS.esp32Ip !== '192.168.1.100' && !state.reconnectTimer) {
+        connectWebSocket();
       } else {
-        stopDemo();
-        // If not demo mode and not connected, trigger connection retry if we have an IP
-        if (SETTINGS.esp32Ip && SETTINGS.esp32Ip !== '192.168.1.100' && !state.reconnectTimer) {
-          connectWebSocket();
-        } else {
-          updateConnectionBadge('disconnected');
-        }
+        updateConnectionBadge('disconnected');
       }
     }
   }
@@ -1441,9 +1296,6 @@ function updateAboutConnectionStatus() {
   if (state.connected) {
     statusBox.className = 'settings-info success';
     statusTxt.textContent = `Connected to ESP32 at ${SETTINGS.esp32Ip}`;
-  } else if (state.demoInterval) {
-    statusBox.className = 'settings-info warn';
-    statusTxt.textContent = 'Demo Mode — not connected to real hardware';
   } else {
     statusBox.className = 'settings-info info';
     statusTxt.textContent = `Disconnected — retrying ${SETTINGS.esp32Ip}:${SETTINGS.wsPort}`;

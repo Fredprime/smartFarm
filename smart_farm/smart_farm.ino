@@ -159,8 +159,8 @@ void setPump(bool on, bool forceOverride = false) {
       Serial.println("[PUMP] BLOCKED — tank empty (float sensor)");
       return;
     }
-    // Check cooldown
-    if (pumpCooldown && (millis() - pumpOffTime < rt_pumpCoolMs)) {
+    // Check cooldown (skipped on manual force override)
+    if (!forceOverride && pumpCooldown && (millis() - pumpOffTime < rt_pumpCoolMs)) {
       Serial.printf("[PUMP] Cooldown active — %lu s remaining\n",
         (rt_pumpCoolMs - (millis() - pumpOffTime)) / 1000);
       return;

@@ -166,7 +166,6 @@ Sensor Leg 2 ──── GND
 | `updateAlerts()` | Renders alert items dynamically |
 | `updateCharts()` | Pushes data into Chart.js line/bar charts |
 | `appendLog()` | Inserts rows into session log table |
-| `startDemo()` | Generates realistic simulated data when ESP32 unreachable |
 | `sendPumpOn/Off()` | Sends WS commands to ESP32 |
 | `setMode()` | Switches between Auto and Manual irrigation modes |
 
@@ -301,7 +300,6 @@ smart_farm/
 | Auto irrigation | Dry the sensor until < 30% | Pump activates automatically |
 | Pump shutoff | Let soil reach 70% | Pump deactivates automatically |
 | Safety shutoff | Hold pump ON for 5 min | Pump auto-stops |
-| Dashboard demo | Open with default ESP32_IP | Simulated data appears immediately |
 | Manual control | Click ON/OFF buttons | Pump state changes instantly |
 | Alerts | Apply heat source near DHT22 | Alert appears in dashboard |
 
