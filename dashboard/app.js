@@ -33,8 +33,11 @@ const state = {
     labels:     [],
   },
   logRows:      [],
-  reconnectTimer: null,
-  lastData:       null,
+  reconnectTimer:      null,
+  lastData:            null,
+  // Grace period: ignore incoming telemetry pump state briefly after a manual command
+  pendingManualCommand: false,
+  pendingManualTimer:   null,
 };
 
 // ----------------------------------------------------------
@@ -328,9 +331,14 @@ function processData(data) {
   }
   lastLoggedPumpState = data.pumpState;
 
-  state.lastData   = data;
-  state.pumpState  = data.pumpState;
-  state.autoMode   = data.autoMode;
+  state.lastData  = data;
+  state.autoMode  = data.autoMode;
+
+  // If we just sent a manual pump command, don't let stale telemetry
+  // (which hasn't reflected the command yet) overwrite the optimistic UI.
+  if (!state.pendingManualCommand) {
+    state.pumpState = data.pumpState;
+  }
 
   // Update all UI components
   updateSensorCards(data);
@@ -863,13 +871,33 @@ function clearLog() {
 // ----------------------------------------------------------
 // Pump & Mode Control (called from HTML buttons)
 // ----------------------------------------------------------
+// Set a grace period so incoming telemetry doesn't overwrite the
+// optimistic pump UI immediately after a manual button press.
+function setPendingManual(durationMs = 2000) {
+  state.pendingManualCommand = true;
+  if (state.pendingManualTimer) clearTimeout(state.pendingManualTimer);
+  state.pendingManualTimer = setTimeout(() => {
+    state.pendingManualCommand = false;
+    state.pendingManualTimer   = null;
+    // Re-apply real state from last telemetry if available
+    if (state.lastData) {
+      state.pumpState = state.lastData.pumpState;
+      updatePumpUI(state.pumpState);
+    }
+  }, durationMs);
+}
+
 function sendPumpOn() {
-  // Always ensure manual mode is set on the ESP32 before turning pump on
+  // Ensure manual mode is active on ESP32 (direct command, not via setMode
+  // to avoid the auto-stop guard racing with pump_on).
   sendCommand({ action: 'set_auto', value: false });
-  // Manual press always sends force:true so the firmware allows it
+  // Manual press always sends force:true so firmware allows it
   // even when the tank guard is enabled and the tank reads empty.
   sendCommand({ action: 'pump_on', force: true });
-  // Optimistic UI update
+  // Optimistic UI update — set grace period before telemetry can override.
+  state.pumpState = true;
+  state.autoMode  = false;
+  setPendingManual(2000);
   updatePumpUI(true);
   updateModeUI(false);
   logPumpEventToCloud('manual_on', true);
@@ -877,6 +905,8 @@ function sendPumpOn() {
 
 function sendPumpOff() {
   sendCommand({ action: 'pump_off' });
+  state.pumpState = false;
+  setPendingManual(2000);
   updatePumpUI(false);
   logPumpEventToCloud('manual_off', false);
 }
@@ -885,6 +915,7 @@ function setMode(auto) {
   // When switching to manual, stop any auto-running pump first
   if (!auto && state.pumpState) {
     sendCommand({ action: 'pump_off' });
+    state.pumpState = false;
     updatePumpUI(false);
   }
   sendCommand({ action: 'set_auto', value: auto });
