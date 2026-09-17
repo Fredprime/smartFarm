@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "outputDirectory": "dashboard",
+  "cleanUrls": true,
+  "routes": [
+    {
+      "src": "/",
+      "dest": "/dashboard/login.html"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/dashboard/$1"
+    }
+  ]
+}
