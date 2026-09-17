@@ -38,9 +38,9 @@
 // GPIO Pin Definitions
 // ----------------------------------------------------------
 
-// DHT22 Temperature & Humidity Sensor
+// DHT11 Temperature & Humidity Sensor
 #define DHT_PIN         4           // GPIO4
-#define DHT_TYPE        DHT22
+#define DHT_TYPE        DHT11
 
 // Soil Moisture Sensor (Analog)
 #define SOIL_MOISTURE_PIN   34      // GPIO34 (ADC1_CH6 — input only)
