@@ -276,10 +276,15 @@ String buildJSON() {
   doc["temperature"]   = round(state.temperature * 10.0) / 10.0;
   doc["humidity"]      = round(state.humidity * 10.0) / 10.0;
   doc["soilMoisture"]  = state.soilMoisture;
+  doc["soil_moisture"] = state.soilMoisture;
   doc["soilRaw"]       = state.soilRaw;
+  doc["soil_raw"]      = state.soilRaw;
   doc["tankFull"]      = state.tankFull;       // Float sensor
+  doc["tank_full"]     = state.tankFull;
   doc["pumpState"]     = state.pumpState;
+  doc["pump_state"]    = state.pumpState;
   doc["autoMode"]      = state.autoMode;
+  doc["auto_mode"]     = state.autoMode;
   doc["timestamp"]     = state.timestamp;
   doc["datestamp"]     = state.datestamp;
   doc["alertCount"]    = state.alertCount;
@@ -351,18 +356,32 @@ void postToSupabase() {
 // Command Processor (Shared by WebSockets and MQTT)
 // ----------------------------------------------------------
 void processCommandJSON(StaticJsonDocument<384>& cmd) {
-  String action = cmd["action"] | "";
+  String action = cmd["action"] | (cmd["command"] | "");
 
-  if (action == "pump_on") {
+  bool isPumpOn = (action == "pump_on") ||
+                  (action == "set_pump" && (cmd["state"] == true || cmd["value"] == true || cmd["state"] == "on" || cmd["value"] == "on")) ||
+                  (cmd.containsKey("pump") && cmd["pump"].as<bool>()) ||
+                  (cmd.containsKey("pump_state") && cmd["pump_state"].as<bool>()) ||
+                  (action == "toggle_pump" && !state.pumpState);
+
+  bool isPumpOff = (action == "pump_off") ||
+                   (action == "set_pump" && (cmd["state"] == false || cmd["value"] == false || cmd["state"] == "off" || cmd["value"] == "off")) ||
+                   (cmd.containsKey("pump") && !cmd["pump"].as<bool>()) ||
+                   (cmd.containsKey("pump_state") && !cmd["pump_state"].as<bool>()) ||
+                   (action == "toggle_pump" && state.pumpState);
+
+  if (isPumpOn) {
     state.autoMode = false;   // Switch to manual
-    bool force = cmd.containsKey("force") && cmd["force"].as<bool>();
+    bool force = (cmd.containsKey("force") && cmd["force"].as<bool>()) ||
+                 (cmd.containsKey("override") && cmd["override"].as<bool>());
     setPump(true, force);
     Serial.printf("[CMD] Manual pump ON%s\n", force ? " (FORCE — tank guard bypassed)" : "");
-  } else if (action == "pump_off") {
+  } else if (isPumpOff) {
+    state.autoMode = false;   // Switch to manual so auto-irrigation doesn't immediately re-arm pump
     setPump(false);
     Serial.println("[CMD] Manual pump OFF");
-  } else if (action == "set_auto") {
-    bool newAutoMode = cmd["value"].as<bool>();
+  } else if (action == "set_auto" || action == "auto_mode") {
+    bool newAutoMode = cmd.containsKey("value") ? cmd["value"].as<bool>() : cmd["state"].as<bool>();
     if (!newAutoMode && state.autoMode && state.pumpState) {
       Serial.println("[CMD] Switched to MANUAL — stopping auto-run pump");
       setPump(false);

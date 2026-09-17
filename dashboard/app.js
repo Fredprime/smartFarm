@@ -326,6 +326,12 @@ async function logoutSupabase() {
 // Data Processing
 // ----------------------------------------------------------
 function processData(data) {
+  // Normalize snake_case / camelCase differences between MQTT and WebSocket
+  if (data.pump_state !== undefined && data.pumpState === undefined) data.pumpState = data.pump_state;
+  if (data.auto_mode  !== undefined && data.autoMode  === undefined) data.autoMode  = data.auto_mode;
+  if (data.tank_full  !== undefined && data.tankFull  === undefined) data.tankFull  = data.tank_full;
+  if (data.soil_moisture !== undefined && data.soilMoisture === undefined) data.soilMoisture = data.soil_moisture;
+
   if (lastLoggedPumpState !== null && lastLoggedPumpState !== data.pumpState) {
     logPumpEventToCloud(data.pumpState ? (data.autoMode ? 'auto_on' : 'manual_on') : (data.autoMode ? 'auto_off' : 'manual_off'), data.pumpState);
   }
@@ -342,8 +348,8 @@ function processData(data) {
 
   // Update all UI components
   updateSensorCards(data);
-  updatePumpUI(data.pumpState);
-  updateModeUI(data.autoMode);
+  updatePumpUI(state.pumpState);
+  updateModeUI(state.autoMode);
   updateTankUI(data.tankFull);
   updateSDStatus(data.sdAvailable, data.sdLogging);
   updateAlerts(data.alerts || [], data.alertCount || 0);
@@ -904,10 +910,14 @@ function sendPumpOn() {
 }
 
 function sendPumpOff() {
+  // Ensure manual mode is active on ESP32 (prevent auto irrigation re-triggering immediately)
+  sendCommand({ action: 'set_auto', value: false });
   sendCommand({ action: 'pump_off' });
   state.pumpState = false;
+  state.autoMode  = false;
   setPendingManual(2000);
   updatePumpUI(false);
+  updateModeUI(false);
   logPumpEventToCloud('manual_off', false);
 }
 
